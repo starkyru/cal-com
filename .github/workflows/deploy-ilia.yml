@@ -73,7 +73,9 @@ jobs:
 
           # Replace URL placeholder in built files
           cd /tmp/deploy
-          bash scripts/replace-placeholder.sh "http://NEXT_PUBLIC_WEBAPP_URL_PLACEHOLDER" "https://calcom.ilia.to"
+          find apps/web/.next apps/web/public -type f | xargs grep -l "NEXT_PUBLIC_WEBAPP_URL_PLACEHOLDER" 2>/dev/null | while read f; do
+            sed -i "s|http://NEXT_PUBLIC_WEBAPP_URL_PLACEHOLDER|https://calcom.ilia.to|g" "$f"
+          done
 
       - name: Set up SSH
         run: |
