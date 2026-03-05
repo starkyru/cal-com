@@ -1,0 +1,101 @@
+name: Deploy to calcom.ilia.to
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-ilia
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_OPTIONS: "--max-old-space-size=6144"
+      NEXT_PUBLIC_WEBAPP_URL: https://calcom.ilia.to
+      NEXT_PUBLIC_API_V2_URL: https://calcom.ilia.to/api/v2
+      NEXT_PUBLIC_LICENSE_CONSENT: agree
+      CALCOM_TELEMETRY_DISABLED: 1
+      NEXTAUTH_SECRET: secret
+      CALENDSO_ENCRYPTION_KEY: secret
+      DATABASE_URL: "postgresql://fake:fake@localhost:5432/fake"
+      BUILD_STANDALONE: true
+      TURBO_TELEMETRY_DISABLED: 1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          yarn config set httpTimeout 1200000
+          yarn install --immutable
+
+      - name: Generate Prisma client
+        run: yarn prisma generate
+
+      - name: Build tRPC
+        run: yarn workspace @calcom/trpc run build
+
+      - name: Build embed-core
+        run: yarn --cwd packages/embeds/embed-core workspace @calcom/embed-core run build
+
+      - name: Copy app store static
+        run: yarn --cwd apps/web workspace @calcom/web run copy-app-store-static
+
+      - name: Build Next.js app
+        run: yarn --cwd apps/web workspace @calcom/web run build
+
+      - name: Prepare deploy package
+        run: |
+          mkdir -p /tmp/deploy/apps/web
+          mkdir -p /tmp/deploy/packages/prisma
+          mkdir -p /tmp/deploy/scripts
+
+          # Next.js standalone output (self-contained with node_modules)
+          cp -r apps/web/.next/standalone/. /tmp/deploy/
+          # Static assets (not included in standalone)
+          cp -r apps/web/.next/static /tmp/deploy/apps/web/.next/static
+          cp -r apps/web/public /tmp/deploy/apps/web/public
+          # Prisma schema + migrations for migrate deploy
+          cp -r packages/prisma /tmp/deploy/packages/prisma
+          # Scripts
+          cp -r scripts /tmp/deploy/scripts
+          # Root configs
+          cp package.json /tmp/deploy/
+          cp i18n.json /tmp/deploy/
+
+          # Replace URL placeholder in built files
+          cd /tmp/deploy
+          bash scripts/replace-placeholder.sh "http://NEXT_PUBLIC_WEBAPP_URL_PLACEHOLDER" "https://calcom.ilia.to"
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to server
+        run: |
+          rsync -azP --delete \
+            --exclude='.env' \
+            /tmp/deploy/ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/apps/calcom/
+
+      - name: Run migrations and restart
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} '
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            cd ~/apps/calcom
+            set -a && source .env && set +a
+            npx prisma migrate deploy --schema packages/prisma/schema.prisma
+            pm2 describe calcom > /dev/null 2>&1 && pm2 restart calcom || pm2 start apps/web/server.js --name calcom -i 1 --node-args="--max-old-space-size=512"
+            pm2 save
+          '
