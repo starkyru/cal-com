@@ -97,7 +97,12 @@ jobs:
             [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
             cd ~/apps/calcom
             set -a && source .env && set +a
-            npx prisma migrate deploy --schema packages/prisma/schema.prisma
+            # Use Prisma 6.x (project version) - global npx may resolve to 7.x
+            if [ ! -f /tmp/prisma-cli/node_modules/.bin/prisma ]; then
+              mkdir -p /tmp/prisma-cli && cd /tmp/prisma-cli && npm init -y 2>/dev/null && npm install prisma@6.16.1 2>/dev/null
+              cd ~/apps/calcom
+            fi
+            /tmp/prisma-cli/node_modules/.bin/prisma migrate deploy --schema packages/prisma/prisma/schema.prisma
             pm2 describe calcom > /dev/null 2>&1 && pm2 restart calcom || pm2 start apps/web/server.js --name calcom -i 1 --node-args="--max-old-space-size=512"
             pm2 save
           '
